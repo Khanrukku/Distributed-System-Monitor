@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Distributed System Monitor</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Distributed System Monitor</h1>
+            <div class="status-indicator">
+                <span id="connection-status" class="status-dot offline"></span>
+                <span id="connection-text">Connecting...</span>
+            </div>
+        </header>
+
+        <div class="dashboard">
+            <!-- System Overview Cards -->
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <h3>CPU Usage</h3>
+                    <div class="metric-value" id="cpu-value">--</div>
+                    <div class="metric-unit">%</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Memory Usage</h3>
+                    <div class="metric-value" id="memory-value">--</div>
+                    <div class="metric-unit">%</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Disk Usage</h3>
+                    <div class="metric-value" id="disk-value">--</div>
+                    <div class="metric-unit">%</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Processes</h3>
+                    <div class="metric-value" id="processes-value">--</div>
+                    <div class="metric-unit">count</div>
+                </div>
+            </div>
+
+            <!-- Charts Section -->
+            <div class="charts-section">
+                <div class="chart-container">
+                    <h3>CPU & Memory Usage Over Time</h3>
+                    <canvas id="systemChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Alerts Section -->
+            <div class="alerts-section">
+                <h3>Recent Alerts</h3>
+                <div id="alerts-container" class="alerts-container">
+                    <p>No alerts to display</p>
+                </div>
+            </div>
+
+            <!-- System Info -->
+            <div class="info-section">
+                <h3>System Information</h3>
+                <div class="info-grid">
+                    <div class="info-item">
+                        <span class="info-label">CPU Cores:</span>
+                        <span id="cpu-cores">--</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Total Memory:</span>
+                        <span id="total-memory">--</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Total Disk:</span>
+                        <span id="total-disk">--</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Last Update:</span>
+                        <span id="last-update">--</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html>
