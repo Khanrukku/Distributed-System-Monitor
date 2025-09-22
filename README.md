@@ -22,4 +22,8 @@ A real-time distributed system monitoring application built with Flask, Redis, a
 - **Subscriber**: Receives and processes messages
 - **Redis**: Message broker and data storage
 - **Flask**: Web framework and API
+
 - **WebSocket**: Real-time frontend updates
+
+https://github.com/user-attachments/assets/a83a29f4-17b5-4d93-8fe7-7740526e3274
+
