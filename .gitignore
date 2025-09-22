@@ -1,0 +1,845 @@
+# Distributed System Monitor - Complete Setup Guide
+
+## Overview
+This project creates a distributed system monitoring application with:
+- **Flask** web framework for the API and dashboard
+- **Redis** for message queuing and data storage
+- **Publisher-Subscriber pattern** for real-time communication
+- **Fault tolerance** and high availability features
+- **Real-time monitoring** of system metrics
+
+## Architecture
+```
+[System Metrics] → [Publisher] → [Redis Pub/Sub] → [Subscriber] → [Dashboard]
+                                      ↓
+                                 [Redis Storage] ← [Alert System]
+```
+
+## Prerequisites Installation
+
+### Step 1: Install Python
+1. Go to [python.org](https://python.org/downloads/)
+2. Download Python 3.8+ for your operating system
+3. During installation, **check "Add Python to PATH"**
+4. Verify installation: Open command prompt/terminal and type:
+   ```bash
+   python --version
+   ```
+
+### Step 2: Install Git
+1. Go to [git-scm.com](https://git-scm.com/downloads)
+2. Download and install Git for your OS
+3. Verify installation:
+   ```bash
+   git --version
+   ```
+
+### Step 3: Install Redis
+**Windows:**
+1. Download Redis from [GitHub Redis releases](https://github.com/microsoftarchive/redis/releases)
+2. Extract and run `redis-server.exe`
+
+**macOS:**
+```bash
+brew install redis
+brew services start redis
+```
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt update
+sudo apt install redis-server
+sudo systemctl start redis-server
+```
+
+Verify Redis is running:
+```bash
+redis-cli ping
+# Should return: PONG
+```
+
+## Project Setup
+
+### Step 4: Create Project Directory
+```bash
+mkdir distributed-system-monitor
+cd distributed-system-monitor
+```
+
+### Step 5: Create Virtual Environment
+```bash
+# Create virtual environment
+python -m venv venv
+
+# Activate it
+# Windows:
+venv\Scripts\activate
+# macOS/Linux:
+source venv/bin/activate
+```
+
+### Step 6: Install Required Packages
+Create `requirements.txt`:
+```txt
+Flask==2.3.3
+Flask-SocketIO==5.3.6
+redis==5.0.1
+psutil==5.9.6
+python-dotenv==1.0.0
+requests==2.31.0
+eventlet==0.33.3
+```
+
+Install packages:
+```bash
+pip install -r requirements.txt
+```
+
+## Project Structure
+Create this folder structure:
+```
+distributed-system-monitor/
+├── app.py                 # Main Flask application
+├── publisher.py           # System metrics publisher
+├── subscriber.py          # Message subscriber
+├── config.py             # Configuration settings
+├── requirements.txt      # Python dependencies
+├── .env                  # Environment variables
+├── .gitignore           # Git ignore file
+├── static/
+│   ├── css/
+│   │   └── style.css    # Dashboard styles
+│   └── js/
+│       └── dashboard.js # Frontend JavaScript
+├── templates/
+│   └── dashboard.html   # Dashboard template
+└── README.md           # Project documentation
+```
+
+## Code Implementation
+
+### Step 7: Configuration File (`config.py`)
+```python
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class Config:
+    # Redis Configuration
+    REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
+    REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
+    REDIS_DB = int(os.getenv('REDIS_DB', 0))
+    REDIS_PASSWORD = os.getenv('REDIS_PASSWORD', None)
+    
+    # Flask Configuration
+    SECRET_KEY = os.getenv('SECRET_KEY', 'your-secret-key-here')
+    DEBUG = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
+    
+    # Monitoring Configuration
+    METRICS_INTERVAL = int(os.getenv('METRICS_INTERVAL', 5))  # seconds
+    ALERT_THRESHOLD_CPU = float(os.getenv('ALERT_THRESHOLD_CPU', 80.0))
+    ALERT_THRESHOLD_MEMORY = float(os.getenv('ALERT_THRESHOLD_MEMORY', 80.0))
+    ALERT_THRESHOLD_DISK = float(os.getenv('ALERT_THRESHOLD_DISK', 90.0))
+    
+    # Channels
+    METRICS_CHANNEL = 'system_metrics'
+    ALERTS_CHANNEL = 'system_alerts'
+```
+
+### Step 8: System Metrics Publisher (`publisher.py`)
+```python
+import redis
+import psutil
+import json
+import time
+import threading
+from datetime import datetime
+from config import Config
+
+class SystemMetricsPublisher:
+    def __init__(self):
+        self.redis_client = redis.Redis(
+            host=Config.REDIS_HOST,
+            port=Config.REDIS_PORT,
+            db=Config.REDIS_DB,
+            password=Config.REDIS_PASSWORD,
+            decode_responses=True
+        )
+        self.running = False
+        
+    def get_system_metrics(self):
+        """Collect system metrics"""
+        try:
+            # CPU metrics
+            cpu_percent = psutil.cpu_percent(interval=1)
+            cpu_count = psutil.cpu_count()
+            
+            # Memory metrics
+            memory = psutil.virtual_memory()
+            
+            # Disk metrics
+            disk = psutil.disk_usage('/')
+            
+            # Network metrics
+            network = psutil.net_io_counters()
+            
+            # Process count
+            process_count = len(psutil.pids())
+            
+            metrics = {
+                'timestamp': datetime.utcnow().isoformat(),
+                'cpu': {
+                    'percent': cpu_percent,
+                    'count': cpu_count
+                },
+                'memory': {
+                    'total': memory.total,
+                    'available': memory.available,
+                    'percent': memory.percent,
+                    'used': memory.used
+                },
+                'disk': {
+                    'total': disk.total,
+                    'used': disk.used,
+                    'free': disk.free,
+                    'percent': (disk.used / disk.total) * 100
+                },
+                'network': {
+                    'bytes_sent': network.bytes_sent,
+                    'bytes_recv': network.bytes_recv,
+                    'packets_sent': network.packets_sent,
+                    'packets_recv': network.packets_recv
+                },
+                'processes': process_count
+            }
+            
+            return metrics
+            
+        except Exception as e:
+            print(f"Error collecting metrics: {e}")
+            return None
+    
+    def check_alerts(self, metrics):
+        """Check for alert conditions"""
+        alerts = []
+        
+        # CPU Alert
+        if metrics['cpu']['percent'] > Config.ALERT_THRESHOLD_CPU:
+            alerts.append({
+                'type': 'cpu',
+                'severity': 'high',
+                'message': f"High CPU usage: {metrics['cpu']['percent']:.1f}%",
+                'timestamp': metrics['timestamp']
+            })
+        
+        # Memory Alert
+        if metrics['memory']['percent'] > Config.ALERT_THRESHOLD_MEMORY:
+            alerts.append({
+                'type': 'memory',
+                'severity': 'high',
+                'message': f"High memory usage: {metrics['memory']['percent']:.1f}%",
+                'timestamp': metrics['timestamp']
+            })
+        
+        # Disk Alert
+        if metrics['disk']['percent'] > Config.ALERT_THRESHOLD_DISK:
+            alerts.append({
+                'type': 'disk',
+                'severity': 'critical',
+                'message': f"High disk usage: {metrics['disk']['percent']:.1f}%",
+                'timestamp': metrics['timestamp']
+            })
+        
+        return alerts
+    
+    def publish_metrics(self):
+        """Publish metrics to Redis"""
+        while self.running:
+            try:
+                metrics = self.get_system_metrics()
+                if metrics:
+                    # Publish to metrics channel
+                    self.redis_client.publish(Config.METRICS_CHANNEL, json.dumps(metrics))
+                    
+                    # Store in Redis with expiration (24 hours)
+                    key = f"metrics:{int(time.time())}"
+                    self.redis_client.setex(key, 86400, json.dumps(metrics))
+                    
+                    # Check for alerts
+                    alerts = self.check_alerts(metrics)
+                    for alert in alerts:
+                        self.redis_client.publish(Config.ALERTS_CHANNEL, json.dumps(alert))
+                        # Store alert
+                        alert_key = f"alert:{int(time.time())}"
+                        self.redis_client.setex(alert_key, 86400, json.dumps(alert))
+                    
+                    print(f"Published metrics at {metrics['timestamp']}")
+                
+            except Exception as e:
+                print(f"Error publishing metrics: {e}")
+            
+            time.sleep(Config.METRICS_INTERVAL)
+    
+    def start(self):
+        """Start publishing metrics"""
+        self.running = True
+        self.thread = threading.Thread(target=self.publish_metrics)
+        self.thread.daemon = True
+        self.thread.start()
+        print("Metrics publisher started")
+    
+    def stop(self):
+        """Stop publishing metrics"""
+        self.running = False
+        if hasattr(self, 'thread'):
+            self.thread.join()
+        print("Metrics publisher stopped")
+
+if __name__ == "__main__":
+    publisher = SystemMetricsPublisher()
+    try:
+        publisher.start()
+        print("Press Ctrl+C to stop...")
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        publisher.stop()
+```
+
+### Step 9: Message Subscriber (`subscriber.py`)
+```python
+import redis
+import json
+import threading
+from config import Config
+
+class SystemMetricsSubscriber:
+    def __init__(self):
+        self.redis_client = redis.Redis(
+            host=Config.REDIS_HOST,
+            port=Config.REDIS_PORT,
+            db=Config.REDIS_DB,
+            password=Config.REDIS_PASSWORD,
+            decode_responses=True
+        )
+        self.pubsub = self.redis_client.pubsub()
+        self.subscribers = {
+            'metrics': [],
+            'alerts': []
+        }
+        self.running = False
+        
+    def subscribe_to_channels(self):
+        """Subscribe to Redis channels"""
+        self.pubsub.subscribe(Config.METRICS_CHANNEL, Config.ALERTS_CHANNEL)
+        
+    def add_metrics_subscriber(self, callback):
+        """Add a callback for metrics updates"""
+        self.subscribers['metrics'].append(callback)
+        
+    def add_alerts_subscriber(self, callback):
+        """Add a callback for alerts"""
+        self.subscribers['alerts'].append(callback)
+        
+    def remove_subscriber(self, callback):
+        """Remove a subscriber callback"""
+        for subscriber_list in self.subscribers.values():
+            if callback in subscriber_list:
+                subscriber_list.remove(callback)
+    
+    def handle_message(self, message):
+        """Handle incoming messages"""
+        try:
+            if message['type'] == 'message':
+                data = json.loads(message['data'])
+                channel = message['channel']
+                
+                if channel == Config.METRICS_CHANNEL:
+                    # Notify metrics subscribers
+                    for callback in self.subscribers['metrics']:
+                        try:
+                            callback(data)
+                        except Exception as e:
+                            print(f"Error in metrics callback: {e}")
+                
+                elif channel == Config.ALERTS_CHANNEL:
+                    # Notify alert subscribers
+                    for callback in self.subscribers['alerts']:
+                        try:
+                            callback(data)
+                        except Exception as e:
+                            print(f"Error in alert callback: {e}")
+                            
+        except Exception as e:
+            print(f"Error handling message: {e}")
+    
+    def listen(self):
+        """Listen for messages"""
+        while self.running:
+            try:
+                message = self.pubsub.get_message(timeout=1.0)
+                if message:
+                    self.handle_message(message)
+            except Exception as e:
+                print(f"Error listening for messages: {e}")
+                break
+    
+    def start(self):
+        """Start the subscriber"""
+        self.running = True
+        self.subscribe_to_channels()
+        self.thread = threading.Thread(target=self.listen)
+        self.thread.daemon = True
+        self.thread.start()
+        print("Subscriber started")
+    
+    def stop(self):
+        """Stop the subscriber"""
+        self.running = False
+        if hasattr(self, 'thread'):
+            self.thread.join()
+        self.pubsub.close()
+        print("Subscriber stopped")
+
+# Global subscriber instance
+subscriber = SystemMetricsSubscriber()
+```
+
+### Step 10: Main Flask Application (`app.py`)
+```python
+from flask import Flask, render_template, jsonify
+from flask_socketio import SocketIO, emit
+import redis
+import json
+from datetime import datetime, timedelta
+from config import Config
+from subscriber import subscriber
+from publisher import SystemMetricsPublisher
+
+# Initialize Flask app
+app = Flask(__name__)
+app.config.from_object(Config)
+
+# Initialize SocketIO for real-time updates
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+# Initialize Redis client
+redis_client = redis.Redis(
+    host=Config.REDIS_HOST,
+    port=Config.REDIS_PORT,
+    db=Config.REDIS_DB,
+    password=Config.REDIS_PASSWORD,
+    decode_responses=True
+)
+
+# Initialize publisher
+publisher = SystemMetricsPublisher()
+
+# Callback functions for subscriber
+def on_metrics_update(data):
+    """Handle metrics updates"""
+    socketio.emit('metrics_update', data)
+
+def on_alert_update(data):
+    """Handle alert updates"""
+    socketio.emit('alert_update', data)
+
+@app.route('/')
+def dashboard():
+    """Render the main dashboard"""
+    return render_template('dashboard.html')
+
+@app.route('/api/metrics/latest')
+def get_latest_metrics():
+    """Get the latest system metrics"""
+    try:
+        # Get keys for recent metrics (last hour)
+        now = int(datetime.utcnow().timestamp())
+        hour_ago = now - 3600
+        
+        keys = []
+        for timestamp in range(hour_ago, now, Config.METRICS_INTERVAL):
+            key = f"metrics:{timestamp}"
+            if redis_client.exists(key):
+                keys.append(key)
+        
+        # Get the most recent metrics
+        if keys:
+            latest_key = max(keys)
+            metrics_data = redis_client.get(latest_key)
+            if metrics_data:
+                return jsonify(json.loads(metrics_data))
+        
+        return jsonify({'error': 'No metrics available'}), 404
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/metrics/history')
+def get_metrics_history():
+    """Get historical metrics data"""
+    try:
+        # Get last 24 hours of data
+        now = int(datetime.utcnow().timestamp())
+        day_ago = now - 86400
+        
+        metrics_list = []
+        for timestamp in range(day_ago, now, Config.METRICS_INTERVAL * 12):  # Every minute
+            key = f"metrics:{timestamp}"
+            if redis_client.exists(key):
+                metrics_data = redis_client.get(key)
+                if metrics_data:
+                    metrics_list.append(json.loads(metrics_data))
+        
+        return jsonify(metrics_list)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/alerts')
+def get_alerts():
+    """Get recent alerts"""
+    try:
+        # Get alerts from last 24 hours
+        now = int(datetime.utcnow().timestamp())
+        day_ago = now - 86400
+        
+        alerts = []
+        for timestamp in range(day_ago, now):
+            key = f"alert:{timestamp}"
+            if redis_client.exists(key):
+                alert_data = redis_client.get(key)
+                if alert_data:
+                    alerts.append(json.loads(alert_data))
+        
+        # Sort by timestamp (most recent first)
+        alerts.sort(key=lambda x: x['timestamp'], reverse=True)
+        return jsonify(alerts[:50])  # Return last 50 alerts
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/health')
+def health_check():
+    """Health check endpoint"""
+    try:
+        # Check Redis connection
+        redis_client.ping()
+        
+        return jsonify({
+            'status': 'healthy',
+            'timestamp': datetime.utcnow().isoformat(),
+            'services': {
+                'redis': 'connected',
+                'publisher': 'running' if publisher.running else 'stopped',
+                'subscriber': 'running' if subscriber.running else 'stopped'
+            }
+        })
+    except Exception as e:
+        return jsonify({
+            'status': 'unhealthy',
+            'error': str(e)
+        }), 500
+
+@socketio.on('connect')
+def handle_connect():
+    """Handle client connection"""
+    print('Client connected')
+    emit('status', {'msg': 'Connected to System Monitor'})
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """Handle client disconnection"""
+    print('Client disconnected')
+
+def initialize_services():
+    """Initialize all services"""
+    # Start subscriber
+    subscriber.add_metrics_subscriber(on_metrics_update)
+    subscriber.add_alerts_subscriber(on_alert_update)
+    subscriber.start()
+    
+    # Start publisher
+    publisher.start()
+
+if __name__ == '__main__':
+    try:
+        initialize_services()
+        print("Starting Distributed System Monitor...")
+        print(f"Dashboard available at: http://localhost:5000")
+        socketio.run(app, host='0.0.0.0', port=5000, debug=Config.DEBUG)
+    except KeyboardInterrupt:
+        print("Shutting down...")
+        publisher.stop()
+        subscriber.stop()
+```
+
+### Step 11: Dashboard HTML Template (`templates/dashboard.html`)
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Distributed System Monitor</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Distributed System Monitor</h1>
+            <div class="status-indicator">
+                <span id="connection-status" class="status-dot offline"></span>
+                <span id="connection-text">Connecting...</span>
+            </div>
+        </header>
+
+        <div class="dashboard">
+            <!-- System Overview Cards -->
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <h3>CPU Usage</h3>
+                    <div class="metric-value" id="cpu-value">--</div>
+                    <div class="metric-unit">%</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Memory Usage</h3>
+                    <div class="metric-value" id="memory-value">--</div>
+                    <div class="metric-unit">%</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Disk Usage</h3>
+                    <div class="metric-value" id="disk-value">--</div>
+                    <div class="metric-unit">%</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Processes</h3>
+                    <div class="metric-value" id="processes-value">--</div>
+                    <div class="metric-unit">count</div>
+                </div>
+            </div>
+
+            <!-- Charts Section -->
+            <div class="charts-section">
+                <div class="chart-container">
+                    <h3>CPU & Memory Usage Over Time</h3>
+                    <canvas id="systemChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Alerts Section -->
+            <div class="alerts-section">
+                <h3>Recent Alerts</h3>
+                <div id="alerts-container" class="alerts-container">
+                    <p>No alerts to display</p>
+                </div>
+            </div>
+
+            <!-- System Info -->
+            <div class="info-section">
+                <h3>System Information</h3>
+                <div class="info-grid">
+                    <div class="info-item">
+                        <span class="info-label">CPU Cores:</span>
+                        <span id="cpu-cores">--</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Total Memory:</span>
+                        <span id="total-memory">--</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Total Disk:</span>
+                        <span id="total-disk">--</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Last Update:</span>
+                        <span id="last-update">--</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html>
+```
+
+## Running the Application
+
+### Step 12: Create Environment File (`.env`)
+```
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_DB=0
+SECRET_KEY=your-super-secret-key-here
+FLASK_DEBUG=True
+METRICS_INTERVAL=5
+ALERT_THRESHOLD_CPU=80.0
+ALERT_THRESHOLD_MEMORY=80.0
+ALERT_THRESHOLD_DISK=90.0
+```
+
+### Step 13: Start the Application
+1. Make sure Redis is running:
+   ```bash
+   redis-cli ping  # Should return PONG
+   ```
+
+2. Activate virtual environment:
+   ```bash
+   # Windows:
+   venv\Scripts\activate
+   # macOS/Linux:
+   source venv/bin/activate
+   ```
+
+3. Run the application:
+   ```bash
+   python app.py
+   ```
+
+4. Open browser and go to: `http://localhost:5000`
+
+## Testing the System
+
+### Step 14: Test High CPU Usage
+Open a new terminal and run this Python script to simulate high CPU:
+```python
+import multiprocessing
+import time
+
+def cpu_stress():
+    while True:
+        pass
+
+if __name__ == "__main__":
+    processes = []
+    for i in range(multiprocessing.cpu_count()):
+        p = multiprocessing.Process(target=cpu_stress)
+        p.start()
+        processes.append(p)
+    
+    time.sleep(30)  # Run for 30 seconds
+    
+    for p in processes:
+        p.terminate()
+```
+
+## Deployment
+
+### Step 15: Prepare for GitHub
+Create `.gitignore`:
+```
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+.tox
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.git
+.mypy_cache
+.pytest_cache
+.hypothesis
+*.egg-info/
+.installed.cfg
+*.egg
+```
+
+### Step 16: Create README.md
+```markdown
+# Distributed System Monitor
+
+A real-time distributed system monitoring application built with Flask, Redis, and WebSocket connections.
+
+## Features
+- Real-time system metrics monitoring
+- Publisher-Subscriber pattern for distributed communication
+- Alert system for threshold breaches
+- Interactive web dashboard
+- Fault tolerance and high availability
+
+## Quick Start
+1. Install Redis
+2. Clone this repository
+3. Install dependencies: `pip install -r requirements.txt`
+4. Start Redis server
+5. Run: `python app.py`
+6. Open: `http://localhost:5000`
+
+## Architecture
+- **Publisher**: Collects and publishes system metrics
+- **Subscriber**: Receives and processes messages
+- **Redis**: Message broker and data storage
+- **Flask**: Web framework and API
+- **WebSocket**: Real-time frontend updates
+```
+
+### Step 17: Push to GitHub
+1. Initialize git repository:
+   ```bash
+   git init
+   ```
+
+2. Add all files:
+   ```bash
+   git add .
+   ```
+
+3. Commit:
+   ```bash
+   git commit -m "Initial commit: Distributed System Monitor"
+   ```
+
+4. Create repository on GitHub (go to github.com, click "New repository")
+
+5. Add remote and push:
+   ```bash
+   git remote add origin https://github.com/yourusername/distributed-system-monitor.git
+   git branch -M main
+   git push -u origin main
+   ```
+
+## Troubleshooting
+
+### Common Issues:
+1. **Redis connection error**: Make sure Redis is running
+2. **Port already in use**: Change port in app.py
+3. **Permission denied**: Run with appropriate permissions
+4. **Module not found**: Activate virtual environment
+
+### Checking Services:
+```bash
+# Check Redis
+redis-cli ping
+
+# Check Python packages
+pip list
+
+# Check if port is available
+netstat -an | grep :5000
+```
+
+## Next Steps
+- Add authentication
+- Implement database storage
+- Add more system metrics
+- Create Docker containers
+- Set up CI/CD pipeline
+- Add unit tests
