@@ -4,7 +4,6 @@ services:
     name: system-monitor-redis
     plan: free
     maxmemoryPolicy: allkeys-lru
-    ipAllowList: []
 
   # Web service
   - type: web
@@ -12,7 +11,7 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --worker-class eventlet -w 1 --bind 0.0.0.0:$PORT app:app
+    startCommand: gunicorn --worker-class eventlet -w 1 --bind 0.0.0.0:$PORT --timeout 120 app:app
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
@@ -21,5 +20,5 @@ services:
           type: redis
           name: system-monitor-redis
           property: connectionString
-      - key: PORT
-        value: 10000
+      - key: SECRET_KEY
+        generateValue: true
