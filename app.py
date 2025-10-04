@@ -1,112 +1,158 @@
+import os
 from flask import Flask, render_template, jsonify
 from flask_socketio import SocketIO, emit
 import redis
 import json
-from datetime import datetime, timedelta
-from config import Config
-from subscriber import subscriber
-from publisher import SystemMetricsPublisher
+import psutil
+import threading
+import time
+from datetime import datetime
 
-# Initialize Flask app
 app = Flask(__name__)
-app.config.from_object(Config)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-change-this')
 
-# Initialize SocketIO for real-time updates
-socketio = SocketIO(app, cors_allowed_origins="*")
+# Initialize SocketIO with eventlet
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
-# Initialize Redis client
-redis_client = redis.Redis(
-    host=Config.REDIS_HOST,
-    port=Config.REDIS_PORT,
-    db=Config.REDIS_DB,
-    password=Config.REDIS_PASSWORD,
-    decode_responses=True
-)
+# Redis connection - use environment variable for Render
+REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
+redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
-# Initialize publisher
-publisher = SystemMetricsPublisher()
+# Configuration
+METRICS_CHANNEL = 'system_metrics'
+ALERT_CHANNEL = 'system_alerts'
+ALERT_THRESHOLDS = {
+    'cpu': 80,
+    'memory': 85,
+    'disk': 90
+}
 
-# Callback functions for subscriber
-def on_metrics_update(data):
-    """Handle metrics updates"""
-    socketio.emit('metrics_update', data)
+class SystemMonitor:
+    """Publisher: Collects and publishes system metrics"""
+    
+    def __init__(self, redis_client):
+        self.redis_client = redis_client
+        self.running = False
+    
+    def collect_metrics(self):
+        """Collect system metrics"""
+        return {
+            'timestamp': datetime.now().isoformat(),
+            'cpu_percent': psutil.cpu_percent(interval=1),
+            'memory_percent': psutil.virtual_memory().percent,
+            'disk_percent': psutil.disk_usage('/').percent,
+            'network_sent': psutil.net_io_counters().bytes_sent,
+            'network_recv': psutil.net_io_counters().bytes_recv
+        }
+    
+    def check_alerts(self, metrics):
+        """Check if any metrics exceed thresholds"""
+        alerts = []
+        if metrics['cpu_percent'] > ALERT_THRESHOLDS['cpu']:
+            alerts.append(f"HIGH CPU: {metrics['cpu_percent']:.1f}%")
+        if metrics['memory_percent'] > ALERT_THRESHOLDS['memory']:
+            alerts.append(f"HIGH MEMORY: {metrics['memory_percent']:.1f}%")
+        if metrics['disk_percent'] > ALERT_THRESHOLDS['disk']:
+            alerts.append(f"HIGH DISK: {metrics['disk_percent']:.1f}%")
+        return alerts
+    
+    def publish_metrics(self):
+        """Continuously publish metrics"""
+        self.running = True
+        while self.running:
+            try:
+                metrics = self.collect_metrics()
+                
+                # Publish metrics
+                self.redis_client.publish(METRICS_CHANNEL, json.dumps(metrics))
+                
+                # Store in Redis with expiration
+                self.redis_client.setex(
+                    'latest_metrics',
+                    60,  # 60 seconds expiration
+                    json.dumps(metrics)
+                )
+                
+                # Check and publish alerts
+                alerts = self.check_alerts(metrics)
+                if alerts:
+                    alert_data = {
+                        'timestamp': metrics['timestamp'],
+                        'alerts': alerts
+                    }
+                    self.redis_client.publish(ALERT_CHANNEL, json.dumps(alert_data))
+                
+                time.sleep(5)  # Publish every 5 seconds
+            except Exception as e:
+                print(f"Error publishing metrics: {e}")
+                time.sleep(5)
+    
+    def start(self):
+        """Start monitoring in background thread"""
+        thread = threading.Thread(target=self.publish_metrics, daemon=True)
+        thread.start()
+    
+    def stop(self):
+        """Stop monitoring"""
+        self.running = False
 
-def on_alert_update(data):
-    """Handle alert updates"""
-    socketio.emit('alert_update', data)
+class MetricsSubscriber:
+    """Subscriber: Receives and broadcasts metrics via WebSocket"""
+    
+    def __init__(self, redis_client, socketio):
+        self.redis_client = redis_client
+        self.socketio = socketio
+        self.pubsub = self.redis_client.pubsub()
+        self.running = False
+    
+    def subscribe(self):
+        """Subscribe to metrics and alerts"""
+        self.pubsub.subscribe(METRICS_CHANNEL, ALERT_CHANNEL)
+        self.running = True
+        
+        for message in self.pubsub.listen():
+            if not self.running:
+                break
+                
+            if message['type'] == 'message':
+                try:
+                    data = json.loads(message['data'])
+                    channel = message['channel']
+                    
+                    if channel == METRICS_CHANNEL:
+                        self.socketio.emit('metrics_update', data)
+                    elif channel == ALERT_CHANNEL:
+                        self.socketio.emit('alert', data)
+                except Exception as e:
+                    print(f"Error processing message: {e}")
+    
+    def start(self):
+        """Start subscribing in background thread"""
+        thread = threading.Thread(target=self.subscribe, daemon=True)
+        thread.start()
+    
+    def stop(self):
+        """Stop subscribing"""
+        self.running = False
+        self.pubsub.close()
+
+# Initialize monitor and subscriber
+monitor = SystemMonitor(redis_client)
+subscriber = MetricsSubscriber(redis_client, socketio)
 
 @app.route('/')
-def dashboard():
-    """Render the main dashboard"""
-    return render_template('dashboard.html')
+def index():
+    """Serve the dashboard"""
+    return render_template('index.html')
 
-@app.route('/api/metrics/latest')
-def get_latest_metrics():
-    """Get the latest system metrics"""
+@app.route('/api/metrics/current')
+def get_current_metrics():
+    """Get latest metrics"""
     try:
-        # Get keys for recent metrics (last hour)
-        now = int(datetime.utcnow().timestamp())
-        hour_ago = now - 3600
-        
-        keys = []
-        for timestamp in range(hour_ago, now, Config.METRICS_INTERVAL):
-            key = f"metrics:{timestamp}"
-            if redis_client.exists(key):
-                keys.append(key)
-        
-        # Get the most recent metrics
-        if keys:
-            latest_key = max(keys)
-            metrics_data = redis_client.get(latest_key)
-            if metrics_data:
-                return jsonify(json.loads(metrics_data))
-        
+        metrics = redis_client.get('latest_metrics')
+        if metrics:
+            return jsonify(json.loads(metrics))
         return jsonify({'error': 'No metrics available'}), 404
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/metrics/history')
-def get_metrics_history():
-    """Get historical metrics data"""
-    try:
-        # Get last 24 hours of data
-        now = int(datetime.utcnow().timestamp())
-        day_ago = now - 86400
-        
-        metrics_list = []
-        for timestamp in range(day_ago, now, Config.METRICS_INTERVAL * 12):  # Every minute
-            key = f"metrics:{timestamp}"
-            if redis_client.exists(key):
-                metrics_data = redis_client.get(key)
-                if metrics_data:
-                    metrics_list.append(json.loads(metrics_data))
-        
-        return jsonify(metrics_list)
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/alerts')
-def get_alerts():
-    """Get recent alerts"""
-    try:
-        # Get alerts from last 24 hours
-        now = int(datetime.utcnow().timestamp())
-        day_ago = now - 86400
-        
-        alerts = []
-        for timestamp in range(day_ago, now):
-            key = f"alert:{timestamp}"
-            if redis_client.exists(key):
-                alert_data = redis_client.get(key)
-                if alert_data:
-                    alerts.append(json.loads(alert_data))
-        
-        # Sort by timestamp (most recent first)
-        alerts.sort(key=lambda x: x['timestamp'], reverse=True)
-        return jsonify(alerts[:50])  # Return last 50 alerts
-        
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -114,52 +160,47 @@ def get_alerts():
 def health_check():
     """Health check endpoint"""
     try:
-        # Check Redis connection
         redis_client.ping()
-        
         return jsonify({
             'status': 'healthy',
-            'timestamp': datetime.utcnow().isoformat(),
-            'services': {
-                'redis': 'connected',
-                'publisher': 'running' if publisher.running else 'stopped',
-                'subscriber': 'running' if subscriber.running else 'stopped'
-            }
+            'redis': 'connected',
+            'timestamp': datetime.now().isoformat()
         })
     except Exception as e:
         return jsonify({
             'status': 'unhealthy',
+            'redis': 'disconnected',
             'error': str(e)
-        }), 500
+        }), 503
 
 @socketio.on('connect')
 def handle_connect():
     """Handle client connection"""
     print('Client connected')
-    emit('status', {'msg': 'Connected to System Monitor'})
+    emit('connected', {'status': 'Connected to monitoring system'})
 
 @socketio.on('disconnect')
 def handle_disconnect():
     """Handle client disconnection"""
     print('Client disconnected')
 
-def initialize_services():
-    """Initialize all services"""
-    # Start subscriber
-    subscriber.add_metrics_subscriber(on_metrics_update)
-    subscriber.add_alerts_subscriber(on_alert_update)
-    subscriber.start()
-    
-    # Start publisher
-    publisher.start()
+@socketio.on('request_metrics')
+def handle_metrics_request():
+    """Handle manual metrics request"""
+    try:
+        metrics = redis_client.get('latest_metrics')
+        if metrics:
+            emit('metrics_update', json.loads(metrics))
+    except Exception as e:
+        emit('error', {'message': str(e)})
 
 if __name__ == '__main__':
-    try:
-        initialize_services()
-        print("Starting Distributed System Monitor...")
-        print(f"Dashboard available at: http://localhost:5000")
-        socketio.run(app, host='0.0.0.0', port=5000, debug=Config.DEBUG)
-    except KeyboardInterrupt:
-        print("Shutting down...")
-        publisher.stop()
-        subscriber.stop()
+    # Start monitoring and subscription
+    monitor.start()
+    subscriber.start()
+    
+    # Get port from environment variable (Render provides this)
+    port = int(os.environ.get('PORT', 5000))
+    
+    # Run with eventlet
+    socketio.run(app, host='0.0.0.0', port=port, debug=False)
