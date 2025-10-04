@@ -1,0 +1,25 @@
+services:
+  # Redis instance
+  - type: redis
+    name: system-monitor-redis
+    plan: free
+    maxmemoryPolicy: allkeys-lru
+    ipAllowList: []
+
+  # Web service
+  - type: web
+    name: distributed-system-monitor
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --worker-class eventlet -w 1 --bind 0.0.0.0:$PORT app:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: system-monitor-redis
+          property: connectionString
+      - key: PORT
+        value: 10000
